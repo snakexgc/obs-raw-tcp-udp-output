@@ -2,102 +2,147 @@ name: Build and Release OBS Plugin
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [master]
+    tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 env:
-  PLUGIN_NAME: raw-tcp-udp-output   # 保留供 steps 中使用
-  OBS_VERSION: '30.0.0'
+  PLUGIN_NAME: raw-tcp-udp-output
+  OBS_VERSION: 30.2.3
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          # ⚠️ matrix 中直接使用字符串字面量，不能引用 env
-          - os: windows-latest
-            plugin_name: raw-tcp-udp-output
-            artifact_ext: .zip
-            cmake_args: "-A x64"
-          - os: ubuntu-22.04
-            plugin_name: raw-tcp-udp-output
-            artifact_ext: .tar.gz
-            cmake_args: ""
-          - os: macos-14
-            plugin_name: raw-tcp-udp-output
-            artifact_ext: .tar.gz
-            cmake_args: "-DCMAKE_OSX_ARCHITECTURES=arm64"
-
-    runs-on: ${{ matrix.os }}
-
+  build-windows:
+    runs-on: windows-latest
     steps:
-      - name: Checkout Code
+      - name: Checkout Plugin
         uses: actions/checkout@v4
 
-      # ===== Windows 依赖 =====
-      - name: Setup Windows Dependencies
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install obs-studio --version=${{ env.OBS_VERSION }} -y
-          echo "LIBOBS_PATH=C:\Program Files\obs-studio" >> $env:GITHUB_ENV
+      - name: Checkout obs-studio
+        uses: actions/checkout@v4
+        with:
+          repository: obsproject/obs-studio
+          ref: ${{ env.OBS_VERSION }}
+          path: obs-studio
 
-      # ===== Linux 依赖 =====
-      - name: Setup Linux Dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libobs-dev cmake build-essential
-          echo "LIBOBS_PATH=/usr" >> $GITHUB_ENV
+      # The official Windows OBS installer ships no headers or import
+      # libraries, so build libobs from source. -DOBS_CMAKE_VERSION=3.0.0
+      # selects the modern build system, which downloads the prebuilt
+      # obs-deps automatically during configure.
+      - name: Configure libobs
+        run: cmake -S obs-studio -B obs-build -A x64 -DOBS_CMAKE_VERSION=3.0.0 -DENABLE_PLUGINS=OFF -DENABLE_UI=OFF -DENABLE_SCRIPTING=OFF
 
-      # ===== macOS 依赖 =====
-      - name: Setup macOS Dependencies
-        if: runner.os == 'macOS'
-        run: |
-          brew install obs cmake
-          echo "LIBOBS_PATH=$(brew --prefix obs)" >> $GITHUB_ENV
+      - name: Build libobs
+        run: cmake --build obs-build --config Release --target libobs --parallel
 
-      # ===== 构建 =====
-      - name: Configure CMake
-        run: |
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLIBOBS_INCLUDE_DIR="${{ env.LIBOBS_PATH }}/include" \
-            -DLIBOBS_LIB="${{ env.LIBOBS_PATH }}" \
-            ${{ matrix.cmake_args }}
+      - name: Install libobs
+        run: cmake --install obs-build --config Release --component Development --prefix "${{ github.workspace }}/libobs-dist"
+
+      - name: Configure Plugin
+        run: cmake -S . -B build -A x64 -DCMAKE_PREFIX_PATH="${{ github.workspace }}/libobs-dist"
 
       - name: Build Plugin
         run: cmake --build build --config Release --parallel
 
-      # ===== 打包（使用 matrix.plugin_name）=====
-      - name: Package Windows
-        if: runner.os == 'Windows'
+      - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path package/obs-plugins/64bit
-          Copy-Item build/Release/${{ matrix.plugin_name }}.dll package/obs-plugins/64bit/
-          Compress-Archive -Path package/* -DestinationPath "${{ matrix.plugin_name }}-windows-x64${{ matrix.artifact_ext }}"
-
-      - name: Package Linux/macOS
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p package/obs-plugins/64bit
-          EXT="so"
-          [ "${{ runner.os }}" = "macOS" ] && EXT="dylib"
-          cp build/${{ matrix.plugin_name }}.$EXT package/obs-plugins/64bit/
-          tar -czvf "${{ matrix.plugin_name }}-${{ runner.os }}-x64${{ matrix.artifact_ext }}" -C package .
+          New-Item -ItemType Directory -Force -Path package/obs-plugins/64bit, "package/data/obs-plugins/$env:PLUGIN_NAME" | Out-Null
+          Copy-Item "build/Release/$env:PLUGIN_NAME.dll" package/obs-plugins/64bit/
+          Copy-Item -Recurse data/locale "package/data/obs-plugins/$env:PLUGIN_NAME/locale"
+          Compress-Archive -Path package/* -DestinationPath "$env:PLUGIN_NAME-windows-x64.zip"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.plugin_name }}-${{ runner.os }}
-          path: "${{ matrix.plugin_name }}-*${{ matrix.artifact_ext }}"
+          name: ${{ env.PLUGIN_NAME }}-windows
+          path: ${{ env.PLUGIN_NAME }}-windows-x64.zip
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Plugin
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libobs-dev pkg-config cmake build-essential
+
+      - name: Configure Plugin
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Plugin
+        run: cmake --build build --parallel
+
+      - name: Package
+        # Layout matches the user plugin directory:
+        # ~/.config/obs-studio/plugins/<name>/{bin/64bit,data}
+        run: |
+          mkdir -p "package/$PLUGIN_NAME/bin/64bit" "package/$PLUGIN_NAME/data"
+          cp "build/$PLUGIN_NAME.so" "package/$PLUGIN_NAME/bin/64bit/"
+          cp -r data/locale "package/$PLUGIN_NAME/data/locale"
+          tar -czf "$PLUGIN_NAME-linux-x86_64.tar.gz" -C package .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PLUGIN_NAME }}-linux
+          path: ${{ env.PLUGIN_NAME }}-linux-x86_64.tar.gz
+
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - name: Checkout Plugin
+        uses: actions/checkout@v4
+
+      - name: Checkout obs-studio
+        uses: actions/checkout@v4
+        with:
+          repository: obsproject/obs-studio
+          ref: ${{ env.OBS_VERSION }}
+          path: obs-studio
+
+      # Homebrew's OBS is an app-bundle cask without headers, so build
+      # libobs from source (configure auto-downloads the universal
+      # prebuilt obs-deps).
+      - name: Configure libobs
+        run: cmake -S obs-studio -B obs-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DENABLE_PLUGINS=OFF -DENABLE_UI=OFF -DENABLE_SCRIPTING=OFF
+
+      - name: Build libobs
+        run: cmake --build obs-build --target libobs --parallel
+
+      - name: Install libobs
+        run: cmake --install obs-build --component Development --prefix "$GITHUB_WORKSPACE/libobs-dist"
+
+      - name: Configure Plugin
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/libobs-dist;$GITHUB_WORKSPACE/libobs-dist/Frameworks"
+
+      - name: Build Plugin
+        run: cmake --build build --parallel
+
+      - name: Package
+        # Layout matches the user plugin directory:
+        # ~/Library/Application Support/obs-studio/plugins/<name>.plugin
+        run: |
+          mkdir -p package
+          cp -R "build/$PLUGIN_NAME.plugin" package/
+          mkdir -p "package/$PLUGIN_NAME.plugin/Contents/Resources"
+          cp -r data/locale "package/$PLUGIN_NAME.plugin/Contents/Resources/locale"
+          tar -czf "$PLUGIN_NAME-macos-universal.tar.gz" -C package .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PLUGIN_NAME }}-macos
+          path: ${{ env.PLUGIN_NAME }}-macos-universal.tar.gz
 
   release:
-    needs: build
+    needs: [build-windows, build-linux, build-macos]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     steps:
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
@@ -113,5 +158,3 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
