@@ -1,0 +1,114 @@
+name: Build and Release OBS Plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: # 允许手动触发测试
+
+env:
+  PLUGIN_NAME: raw-tcp-udp-output
+  OBS_VERSION: '30.0.0' # 根据你依赖的OBS版本调整
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: ${{ env.PLUGIN_NAME }}-windows-x64.zip
+            cmake_args: "-A x64"
+          - os: ubuntu-22.04
+            artifact_name: ${{ env.PLUGIN_NAME }}-linux-x64.tar.gz
+            cmake_args: ""
+          - os: macos-14
+            artifact_name: ${{ env.PLUGIN_NAME }}-macos-arm64.tar.gz
+            cmake_args: "-DCMAKE_OSX_ARCHITECTURES=arm64"
+
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # ===== Windows 依赖 =====
+      - name: Setup Windows Dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install obs-studio --version=${{ env.OBS_VERSION }} -y
+          echo "LIBOBS_PATH=C:\Program Files\obs-studio" >> $env:GITHUB_ENV
+
+      # ===== Linux 依赖 =====
+      - name: Setup Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libobs-dev cmake build-essential
+          echo "LIBOBS_PATH=/usr" >> $GITHUB_ENV
+
+      # ===== macOS 依赖 =====
+      - name: Setup macOS Dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install obs cmake
+          echo "LIBOBS_PATH=$(brew --prefix obs)" >> $GITHUB_ENV
+
+      # ===== 通用构建流程 =====
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLIBOBS_INCLUDE_DIR="${{ env.LIBOBS_PATH }}/include" \
+            -DLIBOBS_LIB="${{ env.LIBOBS_PATH }}" \
+            ${{ matrix.cmake_args }}
+
+      - name: Build Plugin
+        run: cmake --build build --config Release --parallel
+
+      # ===== 打包产物 =====
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package/obs-plugins/64bit
+          Copy-Item build/Release/${{ env.PLUGIN_NAME }}.dll package/obs-plugins/64bit/
+          Compress-Archive -Path package/* -DestinationPath ${{ matrix.artifact_name }}
+
+      - name: Package Linux/macOS
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p package/obs-plugins/64bit
+          cp build/${{ env.PLUGIN_NAME }}.so package/obs-plugins/64bit/ 2>/dev/null || \
+          cp build/${{ env.PLUGIN_NAME }}.dylib package/obs-plugins/64bit/
+          tar -czvf ${{ matrix.artifact_name }} -C package .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}
+
+  # ===== 发布 Release =====
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.zip
+            *.tar.gz
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
