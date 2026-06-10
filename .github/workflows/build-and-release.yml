@@ -32,8 +32,11 @@ jobs:
       - name: Configure libobs
         run: cmake -S obs-studio -B obs-build -A x64 -DOBS_CMAKE_VERSION=3.0.0 -DENABLE_PLUGINS=OFF -DENABLE_UI=OFF -DENABLE_SCRIPTING=OFF
 
+      # obs-frontend-api must be built as well: its install rules are part
+      # of the same Development component even with ENABLE_UI=OFF, and
+      # installing that component fails if the DLL was never built.
       - name: Build libobs
-        run: cmake --build obs-build --config Release --target libobs --parallel
+        run: cmake --build obs-build --config Release --target libobs obs-frontend-api --parallel
 
       - name: Install libobs
         run: cmake --install obs-build --config Release --component Development --prefix "${{ github.workspace }}/libobs-dist"
