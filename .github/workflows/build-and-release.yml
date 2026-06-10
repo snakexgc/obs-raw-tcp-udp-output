@@ -41,8 +41,16 @@ jobs:
       - name: Install libobs
         run: cmake --install obs-build --config Release --component Development --prefix "${{ github.workspace }}/libobs-dist"
 
+      # Diagnostic aid while the pipeline stabilizes; safe to delete later.
+      - name: List installed CMake packages
+        shell: pwsh
+        run: Get-ChildItem -Recurse libobs-dist -Filter *.cmake | ForEach-Object FullName
+
+      # obs-studio installs its CMake packages under <prefix>/cmake/<name>/,
+      # which find_package() does not search relative to <prefix>; adding
+      # <prefix>/cmake as its own prefix entry makes them discoverable.
       - name: Configure Plugin
-        run: cmake -S . -B build -A x64 -DCMAKE_PREFIX_PATH="${{ github.workspace }}/libobs-dist"
+        run: cmake -S . -B build -A x64 -DCMAKE_PREFIX_PATH="${{ github.workspace }}/libobs-dist;${{ github.workspace }}/libobs-dist/cmake"
 
       - name: Build Plugin
         run: cmake --build build --config Release --parallel
