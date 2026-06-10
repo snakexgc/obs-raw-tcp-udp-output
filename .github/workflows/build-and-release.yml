@@ -58,9 +58,11 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path package/obs-plugins/64bit, "package/data/obs-plugins/$env:PLUGIN_NAME" | Out-Null
+          New-Item -ItemType Directory -Force -Path package/obs-plugins/64bit, "package/data/obs-plugins/$env:PLUGIN_NAME", package/tools | Out-Null
           Copy-Item "build/Release/$env:PLUGIN_NAME.dll" package/obs-plugins/64bit/
           Copy-Item -Recurse data/locale "package/data/obs-plugins/$env:PLUGIN_NAME/locale"
+          Copy-Item tools/obs_raw_output_control.lua package/tools/
+          Copy-Item tools/raw_video_server.py package/tools/
           Compress-Archive -Path package/* -DestinationPath "$env:PLUGIN_NAME-windows-x64.zip"
 
       - name: Upload Artifact
