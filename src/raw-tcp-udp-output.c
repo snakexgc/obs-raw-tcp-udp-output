@@ -42,6 +42,7 @@ typedef SOCKET socket_t;
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <errno.h>
@@ -175,6 +176,12 @@ static bool connect_socket(struct raw_output *out, const char *host,
 #endif
 
 		if (connect(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen) == 0) {
+			if (out->is_tcp) {
+				int nodelay = 1;
+				setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
+					   (const char *)&nodelay,
+					   sizeof(nodelay));
+			}
 			out->sock = fd;
 			break;
 		}
