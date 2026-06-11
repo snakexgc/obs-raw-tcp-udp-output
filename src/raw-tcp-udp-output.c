@@ -2,12 +2,13 @@
  * Raw video TCP/UDP output for OBS Studio.
  *
  * Sends encoded video packets to a remote host as a byte stream of
- * [13-byte header][payload] records. Header layout (all integers
+ * [17-byte header][payload] records. Header layout (all integers
  * big-endian):
  *
- *   offset 0, 4 bytes: payload size
- *   offset 4, 1 byte : frame type (0 = non-keyframe, 1 = keyframe/IDR)
- *   offset 5, 8 bytes: DTS
+ *   offset 0,  4 bytes: magic word 0x52415756 ("RAWV")
+ *   offset 4,  4 bytes: payload size
+ *   offset 8,  1 byte : frame type (0 = non-keyframe, 1 = keyframe/IDR)
+ *   offset 9,  8 bytes: DTS
  *
  * TCP: records are written back-to-back on the stream.
  * UDP: the same byte stream is split into datagrams of at most
@@ -59,7 +60,8 @@ OBS_MODULE_USE_DEFAULT_LOCALE("raw-tcp-udp-output", "en-US")
 #define OUTPUT_NAME "Raw Video TCP/UDP Output"
 #define LOG_TAG "[raw-tcp-udp-output]"
 
-#define VIDEO_HEADER_SIZE 13
+#define FRAME_MAGIC 0x52415756u /* "RAWV" */
+#define VIDEO_HEADER_SIZE 17
 
 /* Largest single UDP datagram we emit. Keeps datagrams under a typical
  * 1500-byte MTU and far below the 65507-byte UDP payload limit that
@@ -330,9 +332,10 @@ static void raw_output_packet(void *data, struct encoder_packet *packet)
 		out->buf_capacity = total;
 	}
 
-	write_be32(out->buf, (uint32_t)packet->size);
-	out->buf[4] = packet->keyframe ? 1 : 0;
-	write_be64(out->buf + 5, (uint64_t)packet->dts);
+	write_be32(out->buf, FRAME_MAGIC);
+	write_be32(out->buf + 4, (uint32_t)packet->size);
+	out->buf[8] = packet->keyframe ? 1 : 0;
+	write_be64(out->buf + 9, (uint64_t)packet->dts);
 	memcpy(out->buf + VIDEO_HEADER_SIZE, packet->data, packet->size);
 
 	if (!send_all(out, out->buf, total)) {

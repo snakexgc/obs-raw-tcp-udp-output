@@ -8,9 +8,10 @@ freely.
 
 Wire format (must match src/raw-tcp-udp-output.c):
 
+    [4 bytes magic:        0x52415756 "RAWV"]
     [4 bytes payload size, big-endian]
-    [1 byte  frame type: 1 = keyframe]
-    [8 bytes DTS, big-endian]
+    [1 byte  frame type:   1 = keyframe]
+    [8 bytes DTS,          big-endian]
     [payload: encoded video bitstream, e.g. H.264 Annex B]
 
 TCP carries these records back to back. UDP carries the same byte stream
@@ -45,7 +46,8 @@ import time
 # status lines must not sit in the block buffer when output is redirected
 sys.stdout.reconfigure(line_buffering=True)
 
-HEADER = struct.Struct(">IBQ")  # payload size, keyframe flag, DTS
+MAGIC = b'RAWV'
+HEADER = struct.Struct(">4sIBQ")  # magic(4), payload size(4), keyframe(1), DTS(8)
 
 UDP_DRAIN_CHUNK = 65536
 STATS_INTERVAL = 2.0
@@ -127,14 +129,28 @@ class Session:
         print("  waiting for first keyframe...")
 
     def feed(self, data):
-        """Returns False on desync; the caller should end the session."""
+        """Returns False on unrecoverable error; the caller should end the session."""
         self.buf += data
         while True:
             if len(self.buf) < HEADER.size:
                 return True
-            size, keyframe, _dts = HEADER.unpack_from(self.buf)
+            magic, size, keyframe, _dts = HEADER.unpack_from(self.buf)
+            if magic != MAGIC:
+                # Scan forward for the next magic word so a burst of garbage
+                # (e.g. from a partially-connected encoder) doesn't kill the
+                # session.
+                idx = self.buf.find(MAGIC, 1)
+                if idx < 0:
+                    # Keep the last 3 bytes in case MAGIC straddles a recv()
+                    # boundary, then wait for more data.
+                    keep = min(len(self.buf), len(MAGIC) - 1)
+                    del self.buf[:len(self.buf) - keep]
+                    return True
+                print(f"\n  resync: discarded {idx} bytes to find frame magic")
+                del self.buf[:idx]
+                continue
             if size == 0 or size > self.args.max_frame:
-                print(f"\n  desync detected (frame size {size}), "
+                print(f"\n  bad frame size {size} after valid magic, "
                       "resetting session")
                 return False
             if len(self.buf) < HEADER.size + size:
